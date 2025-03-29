@@ -1,6 +1,6 @@
 FROM golang:1.24.2-alpine AS builder
 WORKDIR /app
-COPY go.mod main.go ./
+COPY . .
 RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o server -tags=netgo
 
 FROM scratch
