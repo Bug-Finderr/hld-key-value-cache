@@ -10,16 +10,32 @@ import (
 	"os"
 	"runtime"
 	"sync"
+	"time"
 )
 
 // Constants
 const (
-	numShards               = 32
-	maxCacheEntriesPerShard = 100_000
+	numShards               = 16
+	maxCacheEntriesPerShard = 20_000
 	port                    = 7171
-	readBufferSize          = 1024
+	readBufferSize          = 4096 // increased to reduce syscalls
 	maxKeyValueSize         = 256
+	maxConnections          = 10000
+	tcpKeepAliveInterval    = 30 * time.Second
 )
+
+var (
+	errorResponse    = []byte("ERROR\n")
+	okResponse       = []byte("OK\n")
+	notFoundResponse = []byte("NOTFOUND\n")
+)
+
+// buffer pool to reduce gc pressure
+var bufferPool = sync.Pool{
+	New: func() interface{} {
+		return make([]byte, readBufferSize)
+	},
+}
 
 // cache entry
 type Entry struct {
@@ -35,6 +51,11 @@ type LRUCache struct {
 	mutex    sync.RWMutex
 }
 
+// manages multiple shards
+type ShardedCache struct {
+	shards [numShards]*LRUCache
+}
+
 // inits a shard
 func NewLRUCache(capacity int) *LRUCache {
 	return &LRUCache{
@@ -42,11 +63,6 @@ func NewLRUCache(capacity int) *LRUCache {
 		items:    make(map[string]*list.Element, capacity),
 		list:     list.New(),
 	}
-}
-
-// manages multiple shards
-type ShardedCache struct {
-	shards [numShards]*LRUCache
 }
 
 // inits cache
@@ -92,23 +108,32 @@ func (sc *ShardedCache) Put(key, value string) {
 	shard := sc.getShard(key)
 	shard.mutex.Lock()
 	defer shard.mutex.Unlock()
+
 	if elem, ok := shard.items[key]; ok {
 		shard.list.MoveToFront(elem)
-		elem.Value.(*Entry).value = value
+		if entry, ok := elem.Value.(*Entry); ok && entry != nil {
+			entry.value = value
+		}
 		return
 	}
+
 	elem := shard.list.PushFront(&Entry{key: key, value: value})
 	shard.items[key] = elem
+
 	if shard.list.Len() > shard.capacity {
-		oldest := shard.list.Back()
-		shard.list.Remove(oldest)
-		delete(shard.items, oldest.Value.(*Entry).key)
+		if oldest := shard.list.Back(); oldest != nil {
+			if entry, ok := oldest.Value.(*Entry); ok && entry != nil {
+				delete(shard.items, entry.key)
+				shard.list.Remove(oldest)
+			}
+		}
 	}
 }
 
 func handleConnection(conn net.Conn, cache *ShardedCache) {
 	defer conn.Close()
 	reader := bufio.NewReaderSize(conn, readBufferSize)
+
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil {
@@ -117,11 +142,13 @@ func handleConnection(conn net.Conn, cache *ShardedCache) {
 			}
 			return
 		}
+
 		ln := line
 		if len(ln) < 4 {
-			conn.Write([]byte("ERROR\n"))
+			conn.Write(errorResponse)
 			continue
 		}
+
 		switch ln[:3] {
 		case "GET":
 			space := 3
@@ -131,9 +158,13 @@ func handleConnection(conn net.Conn, cache *ShardedCache) {
 			key := ln[space : len(ln)-1]
 			val, found := cache.Get(key)
 			if found {
-				conn.Write([]byte(val + "\n"))
+				buf := bufferPool.Get().([]byte)
+				n := copy(buf, val)
+				buf[n] = '\n'
+				conn.Write(buf[:n+1])
+				bufferPool.Put(buf)
 			} else {
-				conn.Write([]byte("NOTFOUND\n"))
+				conn.Write(notFoundResponse)
 			}
 		case "PUT":
 			space := 3
@@ -149,27 +180,27 @@ func handleConnection(conn net.Conn, cache *ShardedCache) {
 				}
 			}
 			if idx < 1 {
-				conn.Write([]byte("ERROR\n"))
+				conn.Write(errorResponse)
 				continue
 			}
 			key := rest[:idx]
 			value := rest[idx+1:]
 			if len(key) > maxKeyValueSize || len(value) > maxKeyValueSize {
-				conn.Write([]byte("ERROR\n"))
+				conn.Write(errorResponse)
 				continue
 			}
 			cache.Put(key, value)
-			conn.Write([]byte("OK\n"))
+			conn.Write(okResponse)
 		default:
-			conn.Write([]byte("ERROR\n"))
+			conn.Write(errorResponse)
 		}
 	}
 }
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	os.Setenv("GOGC", "50")                // more aggressive GC
-	os.Setenv("GODEBUG", "madvdontneed=1") // reduce RSS
+	os.Setenv("GOGC", "80")                          // Less aggressive GC to reduce CPU usage
+	os.Setenv("GODEBUG", "madvdontneed=1,gctrace=0") // Reduce memory usage
 	log.SetOutput(io.Discard)
 
 	sc := NewShardedCache(maxCacheEntriesPerShard)
@@ -181,17 +212,34 @@ func main() {
 	defer ln.Close()
 	fmt.Printf("Server on :%d\n", port)
 
+	sem := make(chan struct{}, maxConnections)
+
 	for {
-		conn, err := ln.Accept()
-		if err != nil {
+		select {
+		case sem <- struct{}{}:
+		default:
+			time.Sleep(1 * time.Millisecond)
 			continue
 		}
+
+		conn, err := ln.Accept()
+		if err != nil {
+			<-sem
+			continue
+		}
+
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			tcpConn.SetLinger(0) // Immediately release the port upon close
+			tcpConn.SetLinger(0)
 			tcpConn.SetNoDelay(true)
+			tcpConn.SetKeepAlive(true)
+			tcpConn.SetKeepAlivePeriod(tcpKeepAliveInterval)
 			tcpConn.SetReadBuffer(readBufferSize)
 			tcpConn.SetWriteBuffer(readBufferSize)
 		}
-		go handleConnection(conn, sc)
+
+		go func(c net.Conn) {
+			handleConnection(c, sc)
+			<-sem
+		}(conn)
 	}
 }

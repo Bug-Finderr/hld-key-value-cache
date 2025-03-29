@@ -3,8 +3,9 @@ import time
 import socket
 from locust import User, task, between
 
+
 class RedisUser(User):
-    wait_time = between(0.0, 0.0)  # reduce wait
+    wait_time = between(0.0, 0.005)
     redis_host = None
     redis_port = None
 
@@ -29,36 +30,37 @@ class RedisUser(User):
 
     def send_command(self, command):
         try:
-            self.client.sendall((command + "\n").encode())
-            return self.client.recv(4096).decode()
+            self.client.sendall(f"{command}\n".encode())
+            response = self.client.recv(4096)
+            return response.decode()
         except Exception as e:
             return f"ERROR: {e}"
 
-    @task(5)
+    @task
     def put_task(self):
-        start_time = time.time()
-        key = f"key_{int(time.time() * 1000)}"
+        start_time = time.perf_counter()
+        key = f"key_{int(time.perf_counter() * 1000)}"
         value = "test_value"
         command = f"PUT {key} {value}"
         response = self.send_command(command)
         self.environment.events.request.fire(
             request_type="PUT",
             name="redis_put",
-            response_time=(time.time() - start_time) * 1000,
+            response_time=(time.perf_counter() - start_time) * 1000,
             response_length=len(response),
             exception=None if "OK" in response else Exception("PUT command failed"),
         )
 
-    @task(5)
+    @task
     def get_task(self):
-        start_time = time.time()
-        key = f"key_{int(time.time() * 1000) - 1}"
+        start_time = time.perf_counter()
+        key = f"key_{int(time.perf_counter() * 1000) - 1}"
         command = f"GET {key}"
         response = self.send_command(command)
         self.environment.events.request.fire(
             request_type="GET",
             name="redis_get",
-            response_time=(time.time() - start_time) * 1000,
+            response_time=(time.perf_counter() - start_time) * 1000,
             response_length=len(response),
             exception=None if response else Exception("Key not found"),
         )
