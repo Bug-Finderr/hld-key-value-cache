@@ -2,7 +2,6 @@ package main
 
 import (
 	"bufio"
-	"bytes"
 	"container/list"
 	"fmt"
 	"io"
@@ -10,16 +9,15 @@ import (
 	"net"
 	"os"
 	"runtime"
-	"strconv"
 	"sync"
 )
 
 // Constants
 const (
-	numShards               = 16      // tried 8, 32.. no improvement in rps
-	maxCacheEntriesPerShard = 100_000 // tried 50_000, no improvement in rps
+	numShards               = 32
+	maxCacheEntriesPerShard = 100_000
 	port                    = 7171
-	readBufferSize          = 65536
+	readBufferSize          = 1024
 	maxKeyValueSize         = 256
 )
 
@@ -108,124 +106,70 @@ func (sc *ShardedCache) Put(key, value string) {
 	}
 }
 
-// extracts command, key, and value
-func parseRESP(data []byte) (cmd, key, value string, ok bool) {
-	if len(data) < 4 || data[0] != '*' {
-		return
-	}
-	parts := bytes.Split(data[:len(data)-2], []byte("\r\n"))
-	if len(parts) < 4 {
-		return
-	}
-	if string(parts[0]) == "*2" && string(parts[2]) == "GET" {
-		cmd = "GET"
-		key = string(parts[4])
-		ok = true
-	} else if string(parts[0]) == "*3" && (string(parts[2]) == "PUT" || string(parts[2]) == "SET") {
-		cmd = "PUT"
-		key = string(parts[4])
-		value = string(parts[6])
-		ok = true
-	}
-	return
-}
-
 func handleConnection(conn net.Conn, cache *ShardedCache) {
 	defer conn.Close()
 	reader := bufio.NewReaderSize(conn, readBufferSize)
 	for {
-		cmdBytes, err := readRESPCommand(reader)
+		line, err := reader.ReadString('\n')
 		if err != nil {
 			if err != io.EOF {
 				log.Println("Error reading:", err)
 			}
 			return
 		}
-		processCommand(conn, cmdBytes, cache)
-	}
-}
-
-func readRESPCommand(reader *bufio.Reader) ([]byte, error) {
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return nil, err
-	}
-	if len(line) < 2 || line[len(line)-2] != '\r' {
-		return nil, fmt.Errorf("invalid RESP format")
-	}
-	line = line[:len(line)-2]
-
-	if line[0] == '*' {
-		numElements, e := strconv.Atoi(line[1:])
-		if e != nil {
-			return nil, fmt.Errorf("invalid array length")
+		ln := line
+		if len(ln) < 4 {
+			conn.Write([]byte("ERROR\n"))
+			continue
 		}
-		cmd := []byte(line + "\r\n")
-		for i := 0; i < numElements; i++ {
-			bulk, err := readBulkString(reader)
-			if err != nil {
-				return nil, err
+		switch ln[:3] {
+		case "GET":
+			space := 3
+			for space < len(ln) && ln[space] == ' ' {
+				space++
 			}
-			cmd = append(cmd, bulk...)
+			key := ln[space : len(ln)-1]
+			val, found := cache.Get(key)
+			if found {
+				conn.Write([]byte(val + "\n"))
+			} else {
+				conn.Write([]byte("NOTFOUND\n"))
+			}
+		case "PUT":
+			space := 3
+			for space < len(ln) && ln[space] == ' ' {
+				space++
+			}
+			rest := ln[space : len(ln)-1]
+			idx := -1
+			for i := 0; i < len(rest); i++ {
+				if rest[i] == ' ' {
+					idx = i
+					break
+				}
+			}
+			if idx < 1 {
+				conn.Write([]byte("ERROR\n"))
+				continue
+			}
+			key := rest[:idx]
+			value := rest[idx+1:]
+			if len(key) > maxKeyValueSize || len(value) > maxKeyValueSize {
+				conn.Write([]byte("ERROR\n"))
+				continue
+			}
+			cache.Put(key, value)
+			conn.Write([]byte("OK\n"))
+		default:
+			conn.Write([]byte("ERROR\n"))
 		}
-		return cmd, nil
-	}
-	return nil, fmt.Errorf("unsupported RESP type")
-}
-
-func readBulkString(reader *bufio.Reader) ([]byte, error) {
-	line, err := reader.ReadString('\n')
-	if err != nil {
-		return nil, err
-	}
-	if len(line) < 2 || line[len(line)-2] != '\r' {
-		return nil, fmt.Errorf("invalid bulk string")
-	}
-	line = line[:len(line)-2]
-	if line[0] != '$' {
-		return nil, fmt.Errorf("expected bulk string")
-	}
-	length, err := strconv.Atoi(line[1:])
-	if err != nil {
-		return nil, fmt.Errorf("invalid bulk string length")
-	}
-	if length < 0 {
-		return []byte("$-1\r\n"), nil
-	}
-	data := make([]byte, length+2)
-	_, err = io.ReadFull(reader, data)
-	if err != nil {
-		return nil, err
-	}
-	return append([]byte(line+"\r\n"), data...), nil
-}
-
-func processCommand(conn net.Conn, rawCmd []byte, cache *ShardedCache) {
-	command, key, value, ok := parseRESP(rawCmd)
-	if !ok {
-		conn.Write([]byte("-ERR invalid command\r\n"))
-		return
-	}
-	switch command {
-	case "GET":
-		if val, found := cache.Get(key); found {
-			conn.Write([]byte("$" + strconv.Itoa(len(val)) + "\r\n" + val + "\r\n"))
-		} else {
-			conn.Write([]byte("$-1\r\n"))
-		}
-	case "PUT":
-		if len(key) > maxKeyValueSize || len(value) > maxKeyValueSize {
-			conn.Write([]byte("-ERR key or value too long\r\n"))
-			return
-		}
-		cache.Put(key, value)
-		conn.Write([]byte("+OK\r\n"))
 	}
 }
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	os.Setenv("GOGC", "800")
+	os.Setenv("GOGC", "50")                // more aggressive GC
+	os.Setenv("GODEBUG", "madvdontneed=1") // reduce RSS
 	log.SetOutput(io.Discard)
 
 	sc := NewShardedCache(maxCacheEntriesPerShard)
@@ -243,6 +187,7 @@ func main() {
 			continue
 		}
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
+			tcpConn.SetLinger(0) // Immediately release the port upon close
 			tcpConn.SetNoDelay(true)
 			tcpConn.SetReadBuffer(readBufferSize)
 			tcpConn.SetWriteBuffer(readBufferSize)

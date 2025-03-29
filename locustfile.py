@@ -4,7 +4,7 @@ import socket
 from locust import User, task, between
 
 class RedisUser(User):
-    wait_time = between(0.05, 0.2)
+    wait_time = between(0.0, 0.0)  # reduce wait
     redis_host = None
     redis_port = None
 
@@ -29,17 +29,17 @@ class RedisUser(User):
 
     def send_command(self, command):
         try:
-            self.client.sendall(command.encode())
+            self.client.sendall((command + "\n").encode())
             return self.client.recv(4096).decode()
         except Exception as e:
             return f"ERROR: {e}"
 
-    @task(2)
+    @task(5)
     def put_task(self):
         start_time = time.time()
         key = f"key_{int(time.time() * 1000)}"
         value = "test_value"
-        command = f"*3\r\n$3\r\nPUT\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
+        command = f"PUT {key} {value}"
         response = self.send_command(command)
         self.environment.events.request.fire(
             request_type="PUT",
@@ -49,11 +49,11 @@ class RedisUser(User):
             exception=None if "OK" in response else Exception("PUT command failed"),
         )
 
-    @task(2)
+    @task(5)
     def get_task(self):
         start_time = time.time()
         key = f"key_{int(time.time() * 1000) - 1}"
-        command = f"*2\r\n$3\r\nGET\r\n${len(key)}\r\n{key}\r\n"
+        command = f"GET {key}"
         response = self.send_command(command)
         self.environment.events.request.fire(
             request_type="GET",
