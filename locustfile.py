@@ -1,17 +1,16 @@
+import os
 import time
 import socket
 from locust import User, task, between
-import os
-
 
 class RedisUser(User):
-    wait_time = between(0.1, 0.5)
+    wait_time = between(0.05, 0.2)
     redis_host = None
     redis_port = None
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if RedisUser.redis_host is None or RedisUser.redis_port is None:
+        if not (RedisUser.redis_host and RedisUser.redis_port):
             if self.host and self.host.startswith("tcp://"):
                 host_port = self.host[6:].split(":")
                 RedisUser.redis_host = host_port[0]
@@ -22,12 +21,16 @@ class RedisUser(User):
 
     def on_start(self):
         self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.client.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         self.client.connect((RedisUser.redis_host, RedisUser.redis_port))
+
+    def on_stop(self):
+        self.client.close()
 
     def send_command(self, command):
         try:
             self.client.sendall(command.encode())
-            return self.client.recv(1024).decode()
+            return self.client.recv(4096).decode()
         except Exception as e:
             return f"ERROR: {e}"
 
@@ -36,9 +39,7 @@ class RedisUser(User):
         start_time = time.time()
         key = f"key_{int(time.time() * 1000)}"
         value = "test_value"
-        command = (
-            f"*3\r\n$3\r\nPUT\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
-        )
+        command = f"*3\r\n$3\r\nPUT\r\n${len(key)}\r\n{key}\r\n${len(value)}\r\n{value}\r\n"
         response = self.send_command(command)
         self.environment.events.request.fire(
             request_type="PUT",
@@ -61,6 +62,3 @@ class RedisUser(User):
             response_length=len(response),
             exception=None if response else Exception("Key not found"),
         )
-
-    def on_stop(self):
-        self.client.close()
