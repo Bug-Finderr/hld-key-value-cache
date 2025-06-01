@@ -90,7 +90,7 @@ Load test was conducted with the following parameters:
 - **Spawn Rate:** 100 users per second
 - **Run Time:** 30 minutes
 
-The server demonstrated appreciable performance under such load. The full test results are available in the [performance report](./assets/report.html).
+The server demonstrated appreciable performance under such load. The full test results are available in the [performance report](./assets/report.html) _[Sorry, the file has been removed]_.
 
 <br />
 
