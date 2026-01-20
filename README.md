@@ -34,7 +34,7 @@ An in-memory key-value cache server implemented in Go, optimized for high throug
 ### Prerequisites
 
 - Docker
-- Go 1.24.2+ (for local builds)
+- Go 1.24.12+ (for local builds)
 - Locust (for load testing)
 
 ### Run from Docker Hub
