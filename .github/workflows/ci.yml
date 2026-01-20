@@ -89,13 +89,6 @@ jobs:
           sleep 5
           echo -e "PUT k v\n" | nc -w 5 localhost 7171 | grep -q "OK"
           echo -e "GET k\n" | nc -w 5 localhost 7171 | grep -q "v"
-      - if: failure()
-        run: docker logs test > failure.log 2>&1
-      - uses: actions/upload-artifact@v4
-        if: failure()
-        with:
-          name: failure-logs
-          path: failure.log
 
   push:
     name: Push to Registry
