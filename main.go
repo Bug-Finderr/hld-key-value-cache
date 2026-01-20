@@ -13,8 +13,13 @@ import (
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
-	os.Setenv("GOGC", "80")                          // less aggressive GC to reduce CPU usage
-	os.Setenv("GODEBUG", "madvdontneed=1,gctrace=0") // reduce memory usage
+	// GC tuning - errors are non-fatal, log and continue
+	if err := os.Setenv("GOGC", "80"); err != nil {
+		fmt.Printf("Warning: failed to set GOGC: %v\n", err)
+	}
+	if err := os.Setenv("GODEBUG", "madvdontneed=1,gctrace=0"); err != nil {
+		fmt.Printf("Warning: failed to set GODEBUG: %v\n", err)
+	}
 	log.SetOutput(io.Discard)
 
 	sc := cache.NewShardedCache(server.MaxCacheEntriesPerShard)

@@ -12,10 +12,11 @@ import (
 	"server/pkg/cache"
 )
 
-// reduce gc pressure
+// reduce gc pressure - use pointer to avoid allocations (staticcheck SA6002)
 var bufferPool = sync.Pool{
 	New: func() interface{} {
-		return make([]byte, ReadBufferSize)
+		buf := make([]byte, ReadBufferSize)
+		return &buf
 	},
 }
 
@@ -34,7 +35,7 @@ func (s *Server) Start() error {
 	if err != nil {
 		return err
 	}
-	defer ln.Close()
+	defer func() { _ = ln.Close() }()
 	fmt.Printf("Server on :%d\n", Port)
 
 	// connection limiter using semaphore pattern
@@ -55,12 +56,12 @@ func (s *Server) Start() error {
 		}
 
 		if tcpConn, ok := conn.(*net.TCPConn); ok {
-			tcpConn.SetLinger(0)
-			tcpConn.SetNoDelay(true)
-			tcpConn.SetKeepAlive(true)
-			tcpConn.SetKeepAlivePeriod(TCPKeepAliveInterval)
-			tcpConn.SetReadBuffer(ReadBufferSize)
-			tcpConn.SetWriteBuffer(ReadBufferSize)
+			_ = tcpConn.SetLinger(0)
+			_ = tcpConn.SetNoDelay(true)
+			_ = tcpConn.SetKeepAlive(true)
+			_ = tcpConn.SetKeepAlivePeriod(TCPKeepAliveInterval)
+			_ = tcpConn.SetReadBuffer(ReadBufferSize)
+			_ = tcpConn.SetWriteBuffer(ReadBufferSize)
 		}
 
 		go func(c net.Conn) {
@@ -71,7 +72,7 @@ func (s *Server) Start() error {
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	reader := bufio.NewReaderSize(conn, ReadBufferSize)
 
 	for {
@@ -85,7 +86,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 		ln := line
 		if len(ln) < 4 {
-			conn.Write(ErrorResponse)
+			_, _ = conn.Write(ErrorResponse)
 			continue
 		}
 
@@ -95,7 +96,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		case "PUT":
 			s.handlePut(conn, ln)
 		default:
-			conn.Write(ErrorResponse)
+			_, _ = conn.Write(ErrorResponse)
 		}
 	}
 }
@@ -110,13 +111,14 @@ func (s *Server) handleGet(conn net.Conn, ln string) {
 	val, found := s.cache.Get(key)
 
 	if found {
-		buf := bufferPool.Get().([]byte)
+		bufPtr := bufferPool.Get().(*[]byte)
+		buf := *bufPtr
 		n := copy(buf, val)
 		buf[n] = '\n'
-		conn.Write(buf[:n+1])
-		bufferPool.Put(buf)
+		_, _ = conn.Write(buf[:n+1])
+		bufferPool.Put(bufPtr)
 	} else {
-		conn.Write(NotFoundResponse)
+		_, _ = conn.Write(NotFoundResponse)
 	}
 }
 
@@ -136,7 +138,7 @@ func (s *Server) handlePut(conn net.Conn, ln string) {
 	}
 
 	if idx < 1 {
-		conn.Write(ErrorResponse)
+		_, _ = conn.Write(ErrorResponse)
 		return
 	}
 
@@ -144,10 +146,10 @@ func (s *Server) handlePut(conn net.Conn, ln string) {
 	value := rest[idx+1:]
 
 	if len(key) > MaxKeyValueSize || len(value) > MaxKeyValueSize {
-		conn.Write(ErrorResponse)
+		_, _ = conn.Write(ErrorResponse)
 		return
 	}
 
 	s.cache.Put(key, value)
-	conn.Write(OkResponse)
+	_, _ = conn.Write(OkResponse)
 }
