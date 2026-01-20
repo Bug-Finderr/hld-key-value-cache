@@ -9,7 +9,7 @@ on:
 
 env:
   IMAGE_NAME: bugfinderr/server
-  GO_VERSION: "1.24.2"
+  GO_VERSION: "1.24.12"
 
 permissions:
   contents: read
