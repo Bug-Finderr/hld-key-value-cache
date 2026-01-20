@@ -1,0 +1,53 @@
+name: CD Pipeline - Kubernetes Deployment
+
+on:
+  workflow_run:
+    workflows: ["CI Pipeline"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: bugfinderr/server
+
+jobs:
+  deploy-to-kubernetes:
+    name: Deploy to Kubernetes (kind)
+    runs-on: ubuntu-latest
+    if: ${{ github.event.workflow_run.conclusion == 'success' || github.event_name == 'workflow_dispatch' }}
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Create kind cluster
+        uses: helm/kind-action@v1.12.0
+        with:
+          cluster_name: cache-cluster
+
+      - name: Build and load image
+        run: |
+          docker build -t cache-server:local .
+          kind load docker-image cache-server:local --name cache-cluster
+
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f k8s/deployment.yaml
+          kubectl rollout status deployment/cache-server --timeout=120s
+
+      - name: Verify deployment
+        run: |
+          echo "=== PODS ===" && kubectl get pods -o wide
+          echo "=== SERVICES ===" && kubectl get svc
+          echo "=== LOGS ===" && kubectl logs -l app=cache-server --tail=20 || true
+
+      - name: Test service
+        run: |
+          kubectl run netcat-test --image=busybox --restart=Never -- sleep 300
+          kubectl wait --for=condition=ready pod/netcat-test --timeout=60s
+          SVC_IP=$(kubectl get svc cache-server -o jsonpath='{.spec.clusterIP}')
+          kubectl exec netcat-test -- sh -c "echo -e 'PUT k8s value\n' | nc -w 5 $SVC_IP 7171" | grep -q "OK"
+          kubectl exec netcat-test -- sh -c "echo -e 'GET k8s\n' | nc -w 5 $SVC_IP 7171" | grep -q "value"
+          echo "Service test passed!"
+
+      - name: Cleanup
+        if: always()
+        run: kubectl delete pod netcat-test --ignore-not-found=true

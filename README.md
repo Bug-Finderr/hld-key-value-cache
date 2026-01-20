@@ -2,6 +2,9 @@
 
 An in-memory key-value cache server implemented in Go, optimized for high throughput and low latency.
 
+![CI Pipeline](https://github.com/Bug-Finderr/hld-key-value-cache/actions/workflows/ci.yml/badge.svg)
+![CD Pipeline](https://github.com/Bug-Finderr/hld-key-value-cache/actions/workflows/cd.yml/badge.svg)
+
 ![System Architecture](./assets/architecture.png)
 
 ## Features
@@ -31,7 +34,7 @@ An in-memory key-value cache server implemented in Go, optimized for high throug
 ### Prerequisites
 
 - Docker
-- Go (for local builds)
+- Go 1.24.2+ (for local builds)
 - Locust (for load testing)
 
 ### Run from Docker Hub
@@ -48,6 +51,83 @@ git clone https://github.com/Bug-Finderr/hld-key-value-cache.git
 cd hld-key-value-cache
 go build -o server
 ./server
+```
+
+### Run Tests
+
+```bash
+# Run all tests with race detection
+go test -v -race ./...
+
+# Run tests with coverage
+go test -v -race -coverprofile=coverage.out ./...
+go tool cover -html=coverage.out
+```
+
+## CI/CD Pipeline
+
+### CI Pipeline (`.github/workflows/ci.yml`)
+
+The CI pipeline runs on every push and pull request to the `main` branch:
+
+| Stage | Tool | Purpose |
+|-------|------|---------|
+| **Lint** | golangci-lint | Enforce coding standards |
+| **SAST** | gosec | Detect code vulnerabilities |
+| **SCA** | govulncheck | Detect vulnerable dependencies |
+| **Unit Tests** | go test | Validate logic with race detection |
+| **Build, Scan & Test** | Docker + Trivy + netcat | Build, scan CVEs, smoke test |
+| **Push** | Docker Hub | Push image (main branch only) |
+
+### CD Pipeline (`.github/workflows/cd.yml`)
+
+The CD pipeline deploys to Kubernetes (kind cluster in GitHub Actions):
+
+| Stage | Tool | Purpose |
+|-------|------|---------|
+| **Create Cluster** | helm/kind-action | Spin up Kubernetes in Docker |
+| **Build & Load** | kind load | Build and load image into cluster |
+| **Deploy** | kubectl apply | Deploy manifests |
+| **Verify** | kubectl | Validate deployment status |
+| **Test** | netcat | Verify service responds correctly |
+
+### Security Scanning Results
+
+Security scan results are automatically uploaded to the GitHub Security tab:
+- **gosec**: Code-level security vulnerabilities
+- **Trivy**: Container image vulnerabilities
+
+## Kubernetes Deployment
+
+### Manifests
+
+Kubernetes manifests are located in `k8s/deployment.yaml`:
+
+- **Deployment**: Single replica with resource limits and health probes
+- **Service**: ClusterIP service exposing port 7171
+
+### Local Kubernetes Testing
+
+```bash
+# Create a kind cluster
+kind create cluster --name cache-cluster
+
+# Build and load the image
+docker build -t cache-server:local .
+kind load docker-image cache-server:local --name cache-cluster
+
+# Deploy
+kubectl apply -f k8s/deployment.yaml
+
+# Verify
+kubectl get pods
+kubectl get svc
+
+# Test
+kubectl run test --image=busybox --rm -it -- sh -c "echo -e 'PUT key value\n' | nc cache-server 7171"
+
+# Cleanup
+kind delete cluster --name cache-cluster
 ```
 
 ## Load Testing with Locust

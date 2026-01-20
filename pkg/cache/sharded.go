@@ -27,8 +27,8 @@ func (sc *ShardedCache) getShard(key string) *LRUCache {
 
 func (sc *ShardedCache) Get(key string) (string, bool) {
 	shard := sc.getShard(key)
-	shard.mutex.RLock()
-	defer shard.mutex.RUnlock()
+	shard.mutex.Lock()
+	defer shard.mutex.Unlock()
 
 	if elem, ok := shard.items[key]; ok {
 		shard.list.MoveToFront(elem)
